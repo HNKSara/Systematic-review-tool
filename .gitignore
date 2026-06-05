@@ -1,0 +1,7 @@
+user_settings.py
+results/
+logs/
+other_resources/
+__pycache__/
+*.pyc
+.~lock.*

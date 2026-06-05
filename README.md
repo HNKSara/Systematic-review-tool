@@ -480,16 +480,12 @@ The results below are from a real run on **2026-06-05**, searching for **Trustwo
 ### Search Query
 
 ```
-(Trustworthy AI OR Safety OR Resilient OR Secure OR Explainable OR Interpretable OR
- Privacy OR Fair OR Bias OR Valid OR Robustness OR Generalizability OR Accountable OR Transparency)
-AND (Healthcare)
-AND (Multi Agentic AI System OR Multi-Agentic AI System OR Agentic AI OR AI Agent OR
-     Multi-Agent OR Multi Agent OR Multi-Agentic System OR Multi Agentic System)
+(deep learning OR machine learning OR neural network)
+AND (healthcare OR clinical OR medical)
+AND (prediction OR diagnosis OR detection)
 ```
 
 Date range: **2022 – 2026**
-
----
 
 ### Paper Counts
 

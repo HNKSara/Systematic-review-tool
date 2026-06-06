@@ -515,41 +515,29 @@ Internal pipeline (APIs): **404 papers** Â· External merge: **+39 new papers** Â
 
 ### Category Distribution
 
-**Trustworthiness Property**
+**domain 1**
 
 | Category | Papers |
 |---|---|
-| Security | 43 |
-| Safety | 33 |
-| Explainability | 24 |
-| Privacy | 24 |
-| Fairness | 7 |
-| Robustness | 3 |
-| Accountability | 2 |
-| Transparency | 2 |
-| Unclassified | 266 |
+| cat 1 | 43 |
+| cat 2 | 33 |
 
-**Healthcare Area**
+
+**domain 2**
 
 | Category | Papers |
-|---|---|
-| General Healthcare | 130 |
-| Clinical Decision Support | 23 |
-| Patient Monitoring | 19 |
-| Medical Imaging | 7 |
-| Drug Discovery | 7 |
-| Mental Health | 4 |
-| EHR / Health Records | 3 |
+
+| cat 1 | 19 |
 | Unclassified | 211 |
 
-**Agent Architecture**
+** domain 3**
 
 | Category | Papers |
 |---|---|
-| Multi-Agent | 105 |
-| Agentic AI | 80 |
-| Agent-General | 33 |
-| Unclassified | 186 |
+| cat 1 | 105 |
+| cat 2 | 80 |
+| cat 3 | 33 |
+| cat 4 | 186 |
 
 ---
 

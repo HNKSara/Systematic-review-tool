@@ -475,7 +475,7 @@ pip install -r requirements.txt
 
 ## Sample Run Report
 
-The results below are from a real run on **2026-06-05**, searching for **Trustworthy AI in Healthcare Multi-Agent Systems** (2022–2026).
+The results below are from a real run on **2026-06-05**, searching for **Toppic** (2022–2026).
 
 ### Search Query
 

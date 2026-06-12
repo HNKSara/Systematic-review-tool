@@ -86,7 +86,8 @@ def fetch(
     """
     Fetch papers from Scopus and return a list of paper dicts.
     Each dict contains: title, abstract, authors, year, doi, url, source.
-    Abstracts are fetched individually via the Abstract Retrieval API (one call per paper).
+    Abstracts are fetched individually via the Abstract Retrieval API — the Scopus
+    Search API does not return abstracts no matter which fields are requested.
     """
     if api_key == "YOUR_SCOPUS_API_KEY" or not api_key:
         print("[Scopus] Skipping: no API key set. Add your key to config.py → SCOPUS_API_KEY.")
@@ -110,7 +111,7 @@ def fetch(
             "start":  start_index,
             # dc:description fetches the abstract in the same batch request —
             # eliminates the need for one individual Abstract Retrieval call per paper.
-            "field":  "dc:title,dc:creator,prism:coverDate,prism:doi,prism:url,eid,dc:description",
+            "field":  "dc:title,dc:creator,prism:coverDate,prism:doi,prism:url,eid",
         }
 
         try:
@@ -149,8 +150,10 @@ def fetch(
             year = int(pub_date[:4]) if pub_date and pub_date[:4].isdigit() else 0
             eid  = entry.get("eid", "")
 
-            # Abstract is included in the batch response — no individual API call needed.
-            abstract = entry.get("dc:description", "")
+            # The Search API doesn't return abstracts regardless of requested fields —
+            # fetch each one individually via the Abstract Retrieval API.
+            abstract = fetch_abstract(eid, headers)
+            time.sleep(0.5)
 
             papers.append({
                 "title":    entry.get("dc:title", ""),

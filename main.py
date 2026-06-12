@@ -24,7 +24,7 @@ from config import (
     RUN_SUMMARY_CSV, RUN_SUMMARY_COLUMNS,
 )
 from config import QUERY_GROUPS, START_YEAR, END_YEAR
-from utils import Tee, compact_query, write_run_summary
+from utils import Tee, compact_query, write_run_summary, print_duplicate_overview, duplicate_source_labels
 
 LOGS_DIR    = pathlib.Path("logs")
 RESULTS_DIR = pathlib.Path("results")
@@ -89,11 +89,19 @@ def deduplicate(papers: list[dict]) -> tuple[list[dict], list[dict]]:
     return unique, duplicates
 
 
-def _write_duplicates_csv(duplicates: list[dict]) -> None:
+def _write_duplicates_csv(duplicates: list[dict], all_papers: list[dict]) -> None:
     """Write cross-database duplicates to Duplicates.csv (fresh file each main.py run)."""
+    source_labels = duplicate_source_labels(
+        [(p.get("source", ""), p.get("title", ""), p.get("doi", "")) for p in all_papers]
+    )
+
+    def _databases(p: dict) -> str:
+        key = p.get("doi", "").strip().lower() or p.get("title", "").strip().lower()
+        return source_labels.get(key, p.get("source", ""))
+
     records = [
         {
-            "database":       p.get("source", ""),
+            "database":       _databases(p),
             "title":          p.get("title", ""),
             "doi":            p.get("doi", ""),
             "authors":        p.get("authors", ""),
@@ -172,7 +180,11 @@ def main() -> None:
         print(f"Total after  deduplication: {len(unique_papers)}")
         print(f"Cross-database duplicates:  {len(dup_papers)}")
 
-        _write_duplicates_csv(dup_papers)
+        print_duplicate_overview(
+            [(p.get("source", ""), p.get("title", ""), p.get("doi", "")) for p in all_papers]
+        )
+
+        _write_duplicates_csv(dup_papers, all_papers)
         _save_run_summary(db_counts, dup_papers)
 
         categorized = unique_papers
@@ -191,8 +203,8 @@ def main() -> None:
             lambda d: f"https://doi.org/{d.strip()}" if str(d).strip() else ""
         )
 
-        # Mark all fetched papers as internal
-        df["source_type"] = "internal"
+        # Tag every fetched paper with the database it came from
+        df["source_type"] = df["source"]
 
         # Column order: source_type first, then identifiers → links → categories → abstract
         front_cols = ["source_type", "title", "authors", "year", "source", "doi", "doi_url", "url"]

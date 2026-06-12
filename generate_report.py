@@ -15,15 +15,34 @@ import matplotlib.patches as mpatches
 from matplotlib.backends.backend_pdf import PdfPages
 import pandas as pd
 
-from config import CATEGORIZATION_DIMENSIONS, QUERY_GROUPS, START_YEAR, END_YEAR
-from utils import compact_query
+# CATEGORIZATION_DIMENSIONS is the keyword-based system from categorize.py,
+# used for the papers.csv charts below (all fetched papers, before
+# screening) — separate from categorize_xlsx.py's LLM-based
+# CATEGORY_DISCOVERY system used by page_paper_categories() (Include papers).
+from config import (
+    CATEGORIZATION_DIMENSIONS, QUERY_GROUPS, START_YEAR, END_YEAR,
+    OUTPUT_FILE_ARXIV, OUTPUT_FILE_PUBMED, OUTPUT_FILE_IEEE, OUTPUT_FILE_SCOPUS,
+)
+from merge_external import (
+    OTHER_RESOURCES,
+    _build_synonym_lookup,
+    _load_user_synonym_overrides,
+    _map_columns,
+    _read_csv_any_encoding,
+)
+from utils import compact_query, build_duplicate_matrix
 
 RESULTS_DIR    = pathlib.Path("results")
 PAPERS_CSV     = RESULTS_DIR / "papers.csv"
 FLAGGED_CSV    = RESULTS_DIR / "papers_flagged.csv"
 VALIDATED_CSV  = RESULTS_DIR / "papers_validated.csv"
 DUPLICATES_CSV = RESULTS_DIR / "Duplicates.csv"
-SUMMARY_CSV    = RESULTS_DIR / "run_summary.csv"
+SCREENED_XLSX  = RESULTS_DIR / "papers_validated_structure_human.xlsx"
+
+# Free-text category columns written by categorize_xlsx.py for Include papers.
+PAPER_CATEGORY_COLUMNS = ["healthcare_type", "trustworthiness_type", "agentic_part"]
+
+SOURCE_FILES = [OUTPUT_FILE_ARXIV, OUTPUT_FILE_PUBMED, OUTPUT_FILE_IEEE, OUTPUT_FILE_SCOPUS]
 
 # ── Palette ───────────────────────────────────────────────────
 C_BLUE    = "#2c7bb6"
@@ -50,6 +69,14 @@ def _load(path: pathlib.Path) -> pd.DataFrame | None:
         return None
 
 
+def _load_xlsx(path: pathlib.Path) -> pd.DataFrame | None:
+    if not path.exists():
+        return None
+    try:
+        return pd.read_excel(path, dtype=str).fillna("")
+    except Exception:
+        return None
+
 
 def _normalize_categories(df: pd.DataFrame) -> pd.DataFrame:
     cat_cols = list(CATEGORIZATION_DIMENSIONS.keys())
@@ -57,6 +84,43 @@ def _normalize_categories(df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = df[col].replace("", "Unclassified")
     return df
+
+
+def _gather_duplicate_records() -> list[tuple[str, str, str]]:
+    """
+    Collect (source_label, title, doi) for every paper from the per-source
+    fetch CSVs and every external CSV in other_resources/, skipping any
+    file that has no papers — used to compute the cross-source duplicate
+    matrix shown on the cover page.
+    """
+    records: list[tuple[str, str, str]] = []
+
+    for path in SOURCE_FILES:
+        df = _load(pathlib.Path(path))
+        if df is None or df.empty:
+            continue
+        records += [
+            (row.get("source", ""), row.get("title", ""), row.get("doi", ""))
+            for row in df.to_dict("records")
+        ]
+
+    csv_files = sorted(OTHER_RESOURCES.glob("*.csv"))
+    if csv_files:
+        lookup = _build_synonym_lookup(_load_user_synonym_overrides())
+        for csv_path in csv_files:
+            try:
+                ext_df = _read_csv_any_encoding(csv_path)
+            except Exception:
+                continue
+            if ext_df.empty:
+                continue
+            mapped, _, _ = _map_columns(ext_df, lookup)
+            records += [
+                (csv_path.name, row.get("title", ""), row.get("doi", ""))
+                for row in mapped.to_dict("records")
+            ]
+
+    return records
 
 
 def _fig() -> tuple[plt.Figure, plt.Axes]:
@@ -113,6 +177,16 @@ def page_cover(pdf: PdfPages, df: pd.DataFrame) -> None:
                 ha="center", va="center", fontsize=8, color=C_TEXT,
                 transform=fig.transFigure)
 
+    # ── Duplicates breakdown by database (just under the boxes) ──
+    if dupes is not None and "database" in dupes.columns and not dupes.empty:
+        by_db = dupes["database"].value_counts()
+        dup_x = gap + 1 * (box_w + gap) + box_w / 2   # center of the "Duplicates" box
+
+        lines = "\n".join(f"{label}: {count}" for label, count in by_db.items())
+        ax.text(dup_x, y_box - 0.012, lines,
+                ha="center", va="top", fontsize=5.5, color=C_TEXT,
+                transform=fig.transFigure, linespacing=1.6)
+
     # ── Query & date range ────────────────────────────────────
     q = compact_query(QUERY_GROUPS) if QUERY_GROUPS else "—"
     wrapped = "\n".join(textwrap.wrap(q, width=145))
@@ -130,39 +204,25 @@ def page_cover(pdf: PdfPages, df: pd.DataFrame) -> None:
             transform=fig.transFigure, style="italic", linespacing=1.5,
             wrap=True, clip_on=True)
 
-    # ── Run summary table ─────────────────────────────────────
-    summary = _load(SUMMARY_CSV)
-    if summary is not None:
-        dupes_df = _load(DUPLICATES_CSV)
-        per_db_dupes: dict[str, int] = {}
-        if dupes_df is not None and "database" in dupes_df.columns:
-            per_db_dupes = dupes_df["database"].value_counts().to_dict()
+    # ── Cross-source duplicate matrix ─────────────────────────
+    matrix_result = build_duplicate_matrix(_gather_duplicate_records())
+    if matrix_result is not None:
+        labels, matrix, counts_by_label, overall_dup, _dup_groups = matrix_result
 
-        display_cols = ["source", "papers_found", "duplicates_with_internal"]
-        headers = ["Source", "Found", "Duplicates", "Final"]
-
-        data = summary.reindex(columns=display_cols, fill_value="—")
-        data["source"] = data["source"].apply(lambda s: s[:40] + "…" if len(s) > 40 else s)
-
-        if per_db_dupes:
-            def _fill_dupes(row):
-                if str(row["duplicates_with_internal"]) in ("", "0", "—"):
-                    return str(per_db_dupes.get(row["source"], 0))
-                return row["duplicates_with_internal"]
-            data["duplicates_with_internal"] = data.apply(_fill_dupes, axis=1)
-
-        def _compute_final(row):
-            try:
-                return str(int(row["papers_found"]) - int(row["duplicates_with_internal"]))
-            except (ValueError, TypeError):
-                return "—"
-        data["final"] = data.apply(_compute_final, axis=1)
+        short_labels = [l[:10] + "…" if len(l) > 10 else l for l in labels]
+        headers = ["Source"] + short_labels + ["Fetched", "Duplicates"]
+        rows = [
+            [short_labels[i]]
+            + [str(matrix[a][b]) if (a != b or matrix[a][b]) else "—" for b in labels]
+            + [str(counts_by_label[a]), str(len(overall_dup[a]))]
+            for i, a in enumerate(labels)
+        ]
 
         table_ax = fig.add_axes([0.04, 0.02, 0.50, 0.58])
         table_ax.axis("off")
 
         tbl = table_ax.table(
-            cellText=data.values.tolist(),
+            cellText=rows,
             colLabels=headers,
             loc="center",
             cellLoc="center",
@@ -173,7 +233,7 @@ def page_cover(pdf: PdfPages, df: pd.DataFrame) -> None:
         tbl.auto_set_column_width(col=list(range(len(headers))))
 
         for (row, col), cell in tbl.get_celld().items():
-            if row == 0:
+            if row == 0 or col == 0:
                 cell.set_facecolor(C_BLUE)
                 cell.set_text_props(color="white", fontweight="bold")
             elif row % 2 == 0:
@@ -363,6 +423,73 @@ def _build_validation_fig(df: pd.DataFrame) -> plt.Figure | None:
     return fig
 
 
+def _build_paper_categories_fig() -> plt.Figure | None:
+    """
+    Bar charts of the free-text categories assigned to Include papers by
+    categorize_xlsx.py (healthcare_type / trustworthiness_type / agentic_part),
+    read live from papers_validated_structure_human.xlsx — so edits made
+    directly in that file are reflected the next time the report is generated.
+    """
+    screened = _load_xlsx(SCREENED_XLSX)
+    if screened is None or "decision" not in screened.columns:
+        return None
+
+    included = screened[screened["decision"].str.strip() == "Include"]
+    dims = [c for c in PAPER_CATEGORY_COLUMNS if c in included.columns]
+    dims = [c for c in dims if included[c].str.strip().replace("unspecified", "").ne("").any()]
+    if not dims:
+        return None
+
+    counts_list = [
+        included[d].str.strip().replace("", "unspecified").value_counts() for d in dims
+    ]
+
+    fig = plt.figure(figsize=(PAGE_W, PAGE_H))
+    fig.patch.set_facecolor("white")
+    fig.suptitle("Paper Categories (Include papers)", fontsize=16,
+                 fontweight="bold", color=C_BLUE, y=0.98)
+
+    fig.text(0.5, 0.945, f"Screened: {len(included)} Include papers "
+             f"(of {len(screened)} total)",
+             ha="center", va="top", fontsize=9, fontweight="bold", color=C_TEXT)
+
+    # Top row: all diagrams except Agentic Part, side by side.
+    # Bottom row: Agentic Part, on its own at the bottom of the page.
+    if len(dims) == 1:
+        axes = [fig.add_subplot(111)]
+    else:
+        gs_top = fig.add_gridspec(1, len(dims) - 1, wspace=0.9,
+                                   top=0.85, bottom=0.5, left=0.22, right=0.98)
+        gs_bottom = fig.add_gridspec(1, 1,
+                                      top=0.32, bottom=0.08, left=0.3, right=0.98)
+        axes = [fig.add_subplot(gs_top[i]) for i in range(len(dims) - 1)]
+        axes.append(fig.add_subplot(gs_bottom[0]))
+
+    for i, (ax, dim, counts) in enumerate(zip(axes, dims, counts_list)):
+        total = counts.sum()
+
+        labels = [f"{v}  ({c / total * 100:.1f}%)" for v, c in counts.items()]
+        colors = [CHART_COLORS[i % len(CHART_COLORS)] for i in range(len(counts))]
+
+        bar_height = 0.4
+        bars = ax.barh(range(len(counts)), counts.values,
+                       color=colors, edgecolor="white", height=bar_height)
+        ax.set_yticks(range(len(counts)))
+        ax.set_yticklabels(labels, fontsize=7)
+        ax.bar_label(bars, padding=3, fontsize=7, color=C_TEXT)
+        ax.invert_yaxis()
+        ax.set_title(dim.replace("_", " ").title(), fontsize=10,
+                     fontweight="bold", color=C_TEXT, pad=14)
+        ax.set_xlabel("Papers", fontsize=7)
+        ax.spines[["top", "right", "left"]].set_visible(False)
+        ax.tick_params(left=False)
+        ax.set_xlim(right=counts.values.max() * 1.18)
+
+    if len(dims) == 1:
+        plt.tight_layout(rect=[0.02, 0.02, 0.98, 0.9])
+    return fig
+
+
 # ── Page wrappers (individual pages, kept for standalone use) ──
 
 def page_year_and_source(pdf: PdfPages, df: pd.DataFrame) -> None:
@@ -380,6 +507,13 @@ def page_categories(pdf: PdfPages, df: pd.DataFrame) -> None:
 
 def page_validation(pdf: PdfPages, df: pd.DataFrame) -> None:
     fig = _build_validation_fig(df)
+    if fig is not None:
+        pdf.savefig(fig)
+        plt.close(fig)
+
+
+def page_paper_categories(pdf: PdfPages) -> None:
+    fig = _build_paper_categories_fig()
     if fig is not None:
         pdf.savefig(fig)
         plt.close(fig)
@@ -431,8 +565,8 @@ def page_combined_last_three(pdf: PdfPages, df: pd.DataFrame) -> None:
         ax_empty = fig.add_subplot(gs[0])
         ax_empty.axis("off")
 
-    # ── Right: validation boxes + flag chart ──────────────────
-    gs_right = gs[1].subgridspec(2, 1, hspace=0.5, height_ratios=[1, 1.4])
+    # ── Right: validation boxes + flag chart + discovered categories ──
+    gs_right = gs[1].subgridspec(3, 1, hspace=0.65, height_ratios=[1, 0.7, 0.7])
 
     ax_boxes = fig.add_subplot(gs_right[0])
     ax_boxes.axis("off")
@@ -494,20 +628,24 @@ def page_combined_last_three(pdf: PdfPages, df: pd.DataFrame) -> None:
             bars = ax_flags.barh(range(len(flag_labels)), flag_values,
                                  color=flag_colors, edgecolor="white", height=0.55)
             ax_flags.set_yticks(range(len(flag_labels)))
-            ax_flags.set_yticklabels(flag_labels, fontsize=7)
-            ax_flags.bar_label(bars, padding=3, fontsize=7)
+            ax_flags.set_yticklabels(flag_labels, fontsize=6)
+            ax_flags.bar_label(bars, padding=3, fontsize=6)
             ax_flags.invert_yaxis()
-            ax_flags.set_title("Flag Frequency", fontsize=10,
+            ax_flags.set_title("Flag Frequency", fontsize=9,
                                fontweight="bold", color=C_TEXT)
-            ax_flags.set_xlabel("Papers flagged", fontsize=7)
+            ax_flags.set_xlabel("Papers flagged", fontsize=6)
             ax_flags.spines[["top", "right", "left"]].set_visible(False)
-            ax_flags.tick_params(left=False)
+            ax_flags.tick_params(left=False, labelsize=6)
             ax_flags.set_facecolor(C_BG)
             ax_flags.set_xlim(right=max(flag_values) * 1.18)
         else:
             ax_flags.axis("off")
     else:
         ax_flags.axis("off")
+
+    # ── (reserved slot — currently unused) ────────────────────
+    ax_extra = fig.add_subplot(gs_right[2])
+    ax_extra.axis("off")
 
     pdf.savefig(fig)
     plt.close(fig)
@@ -534,6 +672,8 @@ def generate(output_path: pathlib.Path | None = None) -> pathlib.Path:
         print("  ✓ Cover page")
         page_combined_last_three(pdf, df)
         print("  ✓ Overview (year, categories, validation)")
+        page_paper_categories(pdf)
+        print("  ✓ Paper categories (from screened xlsx)")
 
         info = pdf.infodict()
         info["Title"]   = "Research Paper Analysis Report"

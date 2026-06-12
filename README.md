@@ -44,7 +44,7 @@ Step 1 ── main.py
           Fetches from IEEE, PubMed, Scopus, ArXiv in parallel.
           Deduplicates across databases.
           Categorizes every paper.
-          Tags all papers: source_type = "internal".
+          Tags all papers: source_type = the database they were fetched from (e.g. "ArXiv", "Scopus").
           Prints run summary table (one row per database).
           Writes → results/papers.csv
                    results/papers_*.csv  (one per database)
@@ -63,7 +63,7 @@ Step 3 ── merge_external.py          (skipped if other_resources/ is empty)
           Reads all *.csv files from other_resources/.
           Auto-maps column names to the canonical format.
           Deduplicates against results/papers.csv.
-          Tags new papers: source_type = "external".
+          Tags new papers: source_type = the source filename they were imported from (e.g. "IEEE_export_040626.csv").
           Appends new duplicates to results/Duplicates.csv.
           Appends one row per file to results/run_summary.csv.
           Writes → results/papers.csv  (updated in-place)
@@ -87,10 +87,10 @@ Step 5 ── generate_report.py
 Run any script on its own if you only need part of the pipeline:
 
 ```bash
-python main.py            # Step 1 — fetch and categorize
-python validate.py        # Step 2 / Step 4 — quality check
-python merge_external.py  # Step 3 — merge external CSVs
-python run_report.py      # Generate PDF report only (no re-fetch)
+python main.py                # Step 1 — fetch and categorize
+python validate.py            # Step 2 / Step 4 — quality check
+python merge_external.py      # Step 3 — merge external CSVs
+python run_report.py          # Generate PDF report only (no re-fetch)
 ```
 
 | Script | Run when… |
@@ -120,10 +120,14 @@ python run_report.py      # Generate PDF report only (no re-fetch)
 ├── fetch_scopus.py            ← Scopus fetcher
 ├── categorize.py              ← Assigns category labels to each paper
 ├── generate_report.py         ← Generates a PDF report from results/ (charts + tables)
+├── download_papers.py         ← Standalone — downloads PDFs for papers in papers_validated.csv
+├── screen_xlsx.py              ← Standalone — LLM screening (Include/Exclude/Unclear) for the final xlsx
+├── categorize_xlsx.py          ← Standalone — LLM categorization (title + abstract) for the final xlsx
 ├── utils.py                   ← Shared utilities (Tee logger, query builder, run summary writer)
 ├── requirements.txt           ← Python dependencies
 ├── other_resources/           ← Drop external CSV files here before running the pipeline
 ├── results/                   ← All CSV output files (created automatically)
+│   └── downloaded_papers/      ← PDFs downloaded by download_papers.py, organized by source
 └── logs/                      ← Timestamped run logs (created automatically)
 ```
 
@@ -155,11 +159,13 @@ Each database has different access requirements:
 | **PubMed** | Optional | Free at https://www.ncbi.nlm.nih.gov/account/ — without key: 3 req/s, with key: 10 req/s |
 | **IEEE** | Yes (free) | Register at https://developer.ieee.org/ — key can take up to 24 h to activate |
 | **Scopus** | Yes (institutional) | Register at https://dev.elsevier.com/ — requires university subscription and VPN |
+| **Anthropic** *(only for `screen_xlsx.py` / `categorize_xlsx.py`)* | Yes (paid) | Get a key at https://console.anthropic.com/settings/keys — requires billing/credits set up |
 
 ```python
-IEEE_API_KEY   = "your_ieee_key"
-SCOPUS_API_KEY = "your_scopus_key"
-PUBMED_API_KEY = "your_pubmed_key"   # leave as "" to run without a key
+IEEE_API_KEY      = "your_ieee_key"
+SCOPUS_API_KEY    = "your_scopus_key"
+PUBMED_API_KEY    = "your_pubmed_key"   # leave as "" to run without a key
+ANTHROPIC_API_KEY = "your_anthropic_key"  # only needed for screen_xlsx.py / categorize_xlsx.py
 ```
 
 > If you do not have a key for IEEE or Scopus, the script skips that database and continues with the others.
@@ -289,6 +295,136 @@ The new column appears automatically in every CSV output file.
 
 ---
 
+## Downloading PDFs
+
+`download_papers.py` is a standalone script that downloads a PDF for every paper in
+`results/papers_validated.csv`.
+
+```bash
+python download_papers.py
+```
+
+**What it does:**
+
+- Groups papers by `source` (database) and creates one subfolder per source under
+  `results/downloaded_papers/`.
+- Renames each file `<index>_<sanitized_title>.pdf`, where `<index>` is the paper's
+  position (1–n) within its source group.
+- Tries several strategies in order until one returns a real PDF:
+  1. **ArXiv** — converts the abstract URL directly to a PDF URL.
+  2. **Unpaywall** — searches all open-access locations for a direct PDF link.
+  3. **Publisher patterns** — known open-access URL formats (Springer, Frontiers).
+  4. **Landing page scrape** — reads the `citation_pdf_url` meta tag from the
+     publisher page.
+  5. **Direct URL/DOI** — last-resort attempt at the paper's `doi_url` / `url`.
+- Skips files that already exist on disk, so it's safe to re-run after a partial
+  download (e.g. to retry only the papers that failed).
+
+**Output:**
+- `results/downloaded_papers/<source>/<index>_<title>.pdf`
+- `logs/download_<timestamp>.log` — per-paper status (`OK` / `SKIP` / `FAIL`) and a
+  summary of downloaded / skipped / failed counts.
+
+> Papers behind a paywall with no open-access copy will be reported as `FAIL`.
+
+---
+
+## Screening Abstracts (LLM)
+
+`screen_xlsx.py` is a standalone script that uses the Anthropic API to screen every
+unscreened paper in `results/papers_validated_structure_human.xlsx` for inclusion in
+the review, based on your `QUERY_GROUPS`.
+
+```bash
+python screen_xlsx.py
+```
+
+**Setup:** add your Anthropic API key to `user_settings.py`:
+
+```python
+ANTHROPIC_API_KEY = "sk-ant-..."
+```
+
+**Column structure check:** before screening, the script compares the file's columns
+against the expected structure (`source_type, title, authors, year, doi_url, url,
+abstract, decision, reason, healthcare_type, trustworthiness_type, agentic_part`, in
+that order). If the file's columns don't match exactly, the script stops and tells
+you to fix the table first — this keeps the file format consistent across runs.
+
+**What it does, for each unscreened paper:**
+
+1. Builds a "review query" string from `QUERY_GROUPS` (same format used elsewhere in
+   the pipeline).
+2. Sends the title + abstract to `claude-sonnet-4-5-20250929` along with the review
+   query.
+3. Parses the model's JSON response and writes two columns back to the xlsx file:
+   - `decision` — `Include`, `Exclude`, or `Unclear`
+   - `reason` — one short sentence justification
+
+**Resumable:** rows that already have a `decision` are skipped, so you can re-run the
+script after it's interrupted (e.g. by a rate limit or a credit issue) and it will
+only screen the remaining rows. The file is saved after every row.
+
+**Useful flags:**
+
+```bash
+python screen_xlsx.py --limit 10   # screen only the first 10 unscreened rows (for testing)
+python screen_xlsx.py --sleep 1.0  # extra delay between API calls
+```
+
+**Output:**
+- `results/papers_validated_structure_human.xlsx` — updated in-place with
+  `decision` / `reason` columns
+- `logs/screening_xlsx_<timestamp>.log` — per-paper decisions and a final
+  Include/Exclude/Unclear summary
+
+---
+
+## Categorizing Included Papers (LLM)
+
+`categorize_xlsx.py` is a standalone script that uses the Anthropic API to categorize
+every `Include` paper in `results/papers_validated_structure_human.xlsx`, based on
+its title and abstract.
+
+```bash
+python categorize_xlsx.py
+```
+
+**Setup:** uses the same `ANTHROPIC_API_KEY` as `screen_xlsx.py`.
+
+**Column structure check:** like `screen_xlsx.py`, it checks the file's columns
+(ignoring the three category columns themselves) against the expected structure
+before running, and stops with instructions if they don't match.
+
+**What it does, for each `Include` paper not yet categorized:**
+
+1. Builds the same "review query" string from `QUERY_GROUPS`.
+2. Sends the title + abstract to `claude-sonnet-4-5-20250929` along with the review
+   query.
+3. Parses the model's JSON response and writes three columns back to the xlsx file:
+   - `healthcare_type` — the specific healthcare domain addressed
+   - `trustworthiness_type` — the type of trustworthiness addressed
+   - `agentic_part` — the role/aspect of the multi-agent system addressed
+
+   Any category the model can't determine is set to `"unspecified"`.
+
+**Resumable:** `Include` rows where all three category columns are already filled are
+skipped. The file is saved after every row.
+
+**Useful flags:**
+
+```bash
+python categorize_xlsx.py --limit 10   # categorize only the first 10 rows (for testing)
+python categorize_xlsx.py --sleep 1.0  # extra delay between API calls
+```
+
+**Output:**
+- `results/papers_validated_structure_human.xlsx` — updated in-place with
+  `healthcare_type` / `trustworthiness_type` / `agentic_part` columns
+- `logs/categorize_xlsx_<timestamp>.log` — per-paper categories and a final summary
+
+---
+
 ## Output Files
 
 All files are saved inside `results/` (created automatically).
@@ -337,7 +473,7 @@ Every `papers*.csv` file has these columns:
 
 | Column | Description |
 |---|---|
-| `source_type` | `internal` — fetched via APIs; `external` — imported from `other_resources/` |
+| `source_type` | Origin of the row: the database name (e.g. `ArXiv`, `Scopus`) for papers fetched via APIs, or the source filename (e.g. `IEEE_export_040626.csv`) for papers imported from `other_resources/` |
 | `title` | Paper title |
 | `authors` | Author names |
 | `year` | Publication year |
@@ -347,6 +483,18 @@ Every `papers*.csv` file has these columns:
 | `url` | Direct link to the paper page |
 | *(your dimensions)* | One column per dimension in `CATEGORIZATION_DIMENSIONS` |
 | `abstract` | Full abstract text |
+
+`results/papers_validated_structure_human.xlsx` (a manually curated subset of
+`papers_validated.csv`) additionally has, once `screen_xlsx.py` and
+`categorize_xlsx.py` have run:
+
+| Column | Description |
+|---|---|
+| `decision` | LLM screening result — `Include`, `Exclude`, or `Unclear` (see [Screening Abstracts](#screening-abstracts-llm)) |
+| `reason` | One short sentence justification for the decision |
+| `healthcare_type` | LLM-assigned healthcare domain for `Include` papers (see [Categorizing Included Papers](#categorizing-included-papers-llm)) |
+| `trustworthiness_type` | LLM-assigned trustworthiness type for `Include` papers |
+| `agentic_part` | LLM-assigned agentic role/aspect for `Include` papers |
 
 ### Duplicates.csv column reference
 
@@ -410,6 +558,9 @@ Every run creates a timestamped log in the `logs/` folder:
 | `main.py` | `logs/run_<timestamp>.log` | API requests, paper counts, category summary, rate-limit warnings, duplicate count |
 | `validate.py` | `logs/validate_<timestamp>.log` | Full validation report, flag breakdown, validated/excluded counts |
 | `merge_external.py` | `logs/merge_<timestamp>.log` | Per-file column mapping, duplicate details, final counts |
+| `download_papers.py` | `logs/download_<timestamp>.log` | Per-paper download status (OK/SKIP/FAIL), source used, summary counts |
+| `screen_xlsx.py` | `logs/screening_xlsx_<timestamp>.log` | Review query, per-paper decision/reason, Include/Exclude/Unclear summary |
+| `categorize_xlsx.py` | `logs/categorize_xlsx_<timestamp>.log` | Review query, per-paper categories, category summaries |
 
 ---
 

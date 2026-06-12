@@ -2,6 +2,11 @@
 # categorize.py — Assign category labels to papers
 # Uses keyword matching on title + abstract (case-insensitive).
 # All dimensions and keywords are defined in config.py.
+#
+# This is the keyword-based CATEGORIZATION_DIMENSIONS system, applied to
+# ALL fetched papers in papers.csv (before screening). It is separate from
+# categorize_xlsx.py's LLM-based CATEGORY_DISCOVERY system, which only
+# categorizes Include papers.
 # =============================================================
 
 from config import CATEGORIZATION_DIMENSIONS

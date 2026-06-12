@@ -85,6 +85,12 @@ QUERY_GROUPS = [
 # Papers that match nothing get the label "Unclassified".
 #
 # Add, rename, or remove dimensions and categories freely.
+#
+# Used by categorize.py / generate_report.py for ALL fetched papers
+# in papers.csv (before screening) — a separate, manually-maintained
+# keyword system. It is independent of categorize_xlsx.py, which
+# categorizes only Include papers via the LLM (see CATEGORY_DISCOVERY
+# below).
 CATEGORIZATION_DIMENSIONS = {
     "clinical_application": {
         "Medical Imaging":    ["imaging", "radiology", "mri", "ct scan"],
@@ -110,4 +116,15 @@ CATEGORIZATION_DIMENSIONS = {
         "Wearable / Signal":    ["wearable", "ecg", "eeg", "time series"],
         "Multi-modal":          ["multimodal", "fusion", "heterogeneous"],
     },
+}
+
+# ── CATEGORY DISCOVERY (categorize_xlsx.py, pass 2) ──────────
+# categorize_xlsx.py first asks the model for a short free-text label per
+# paper for each column below. Then, for each column listed here, it merges
+# all the distinct labels it collected into at most N broader categories.
+# Columns not listed here keep their free-text labels as-is.
+CATEGORY_DISCOVERY = {
+    "healthcare_type":       10,
+    "trustworthiness_type":  5,
+    "agentic_part":          5,
 }

@@ -10,6 +10,9 @@ import datetime
 import pathlib
 import pandas as pd
 from config import OUTPUT_FILE
+# CATEGORIZATION_DIMENSIONS here is the keyword-based system from
+# categorize.py, used for papers.csv (before screening) — separate from
+# categorize_xlsx.py's LLM-based CATEGORY_DISCOVERY system for Include papers.
 from config import START_YEAR, END_YEAR, CATEGORIZATION_DIMENSIONS
 from utils import Tee
 

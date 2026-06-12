@@ -1,7 +1,8 @@
 # =============================================================
 # merge_external.py — Merge CSVs from other_resources/ into
-#                     papers.csv, tagging each row as internal
-#                     or external via the source_type column.
+#                     papers.csv, tagging each row with the database
+#                     (fetched papers) or source filename (imported
+#                     papers) it came from via the source_type column.
 #
 # Usage:  python merge_external.py
 #
@@ -23,7 +24,7 @@ from config import (
     RUN_SUMMARY_CSV, RUN_SUMMARY_COLUMNS,
 )
 from config import QUERY_GROUPS, START_YEAR, END_YEAR
-from utils import Tee, compact_query, write_run_summary
+from utils import Tee, compact_query, write_run_summary, print_duplicate_overview, duplicate_source_labels
 
 LOGS_DIR        = pathlib.Path("logs")
 RESULTS_DIR     = pathlib.Path("results")
@@ -32,7 +33,9 @@ PAPERS_CSV      = pathlib.Path(OUTPUT_FILE)
 _DUPLICATES_CSV = pathlib.Path(DUPLICATES_CSV)
 
 # Canonical column order (must match main.py's front_cols + cat_cols + abstract)
-# source_type is always first: "internal" for fetched papers, "external" for imported ones.
+# source_type is always first: the database name for fetched papers
+# (e.g. "ArXiv", "Scopus"), the source filename for imported ones
+# (e.g. "IEEE_export_040626.csv").
 CANONICAL_COLUMNS = [
     "source_type",
     "title", "authors", "year", "source", "doi", "doi_url", "url",
@@ -155,10 +158,18 @@ def _normalize(value: object) -> str:
     return str(value).strip().lower() if pd.notna(value) and str(value).strip() else ""
 
 
-def _dup_record(row: pd.Series, dup_type: str) -> dict:
-    """Build one row for Duplicates.csv from a paper row."""
+def _dup_record(row: pd.Series, dup_type: str, source_labels: dict[str, str]) -> dict:
+    """
+    Build one row for Duplicates.csv from a paper row.
+
+    `database` lists every source the paper was found in, dash-joined
+    (e.g. "IEEE_export_040626.csv-Scopus"); falls back to this row's own
+    source/file label when the paper isn't part of a known multi-source group.
+    """
+    own_label = row.get("_source_file", "") or row.get("source", "")
+    key = _normalize(row.get("doi", "")) or _normalize(row.get("title", ""))
     return {
-        "database":       row.get("_source_file", ""),
+        "database":       source_labels.get(key, own_label),
         "title":          row.get("title", ""),
         "doi":            row.get("doi", ""),
         "authors":        row.get("authors", ""),
@@ -170,6 +181,7 @@ def _dup_record(row: pd.Series, dup_type: str) -> dict:
 
 def _self_deduplicate(
     df: pd.DataFrame,
+    source_labels: dict[str, str],
 ) -> tuple[pd.DataFrame, list[dict]]:
     """
     Remove rows duplicated within df itself (by DOI then title).
@@ -185,11 +197,11 @@ def _self_deduplicate(
         title = _normalize(row.get("title", ""))
 
         if doi and doi in seen_dois:
-            dup_records.append(_dup_record(row, "self-duplicate (other_resources)"))
+            dup_records.append(_dup_record(row, "self-duplicate (other_resources)", source_labels))
             keep.append(False)
             continue
         if title and title in seen_titles:
-            dup_records.append(_dup_record(row, "self-duplicate (other_resources)"))
+            dup_records.append(_dup_record(row, "self-duplicate (other_resources)", source_labels))
             keep.append(False)
             continue
 
@@ -205,6 +217,7 @@ def _self_deduplicate(
 def _deduplicate_against_existing(
     new_rows: pd.DataFrame,
     existing: pd.DataFrame,
+    source_labels: dict[str, str],
 ) -> tuple[pd.DataFrame, list[dict]]:
     """
     Return (unique_rows, duplicate_records) where unique_rows are rows from
@@ -236,11 +249,11 @@ def _deduplicate_against_existing(
             continue
 
         if doi and doi in seen_dois:
-            dup_records.append(_dup_record(row, "duplicate of papers.csv"))
+            dup_records.append(_dup_record(row, "duplicate of papers.csv", source_labels))
             keep.append(False)
             continue
         if title and title in seen_titles:
-            dup_records.append(_dup_record(row, "duplicate of papers.csv"))
+            dup_records.append(_dup_record(row, "duplicate of papers.csv", source_labels))
             keep.append(False)
             continue
 
@@ -367,11 +380,16 @@ def main() -> None:
         print()
         if PAPERS_CSV.exists():
             existing_df = pd.read_csv(PAPERS_CSV, dtype=str, encoding="utf-8-sig").fillna("")
-            # Backfill source_type for papers written before this column was added
+            # Migrate source_type from the old generic "internal"/"external" labels
+            # (or backfill it if missing entirely) to the actual database name —
+            # fetched papers already carry it in `source`; imported rows from a
+            # prior run can't be traced back to their file, so `source` is the
+            # closest known label for them too.
             if "source_type" not in existing_df.columns:
-                existing_df.insert(0, "source_type", "internal")
+                existing_df.insert(0, "source_type", existing_df["source"])
             else:
-                existing_df["source_type"] = existing_df["source_type"].replace("", "internal")
+                generic = existing_df["source_type"].isin(["", "internal", "external"])
+                existing_df.loc[generic, "source_type"] = existing_df.loc[generic, "source"]
             print(f"Existing papers.csv: {len(existing_df)} papers loaded.")
         else:
             existing_df = pd.DataFrame(columns=CANONICAL_COLUMNS)
@@ -409,8 +427,8 @@ def main() -> None:
                 if filled:
                     print(f"  Left empty: {filled}")
 
-                # Flag all rows from external files
-                mapped["source_type"]  = "external"
+                # Tag every row with the external file it came from
+                mapped["source_type"]  = csv_path.name
                 # Tag every row with its source filename for Duplicates.csv tracking
                 mapped["_source_file"] = csv_path.name
 
@@ -429,10 +447,19 @@ def main() -> None:
         new_df = pd.concat(all_new, ignore_index=True)
         print(f"Total rows from other_resources/: {len(new_df)}")
 
+        combined_records = (
+            [(row.get("source", ""), row.get("title", ""), row.get("doi", ""))
+             for _, row in existing_df.iterrows()]
+            + [(row.get("_source_file", ""), row.get("title", ""), row.get("doi", ""))
+               for _, row in new_df.iterrows()]
+        )
+        print_duplicate_overview(combined_records)
+        source_labels = duplicate_source_labels(combined_records)
+
         all_dup_records: list[dict] = []
 
         # ── Self-deduplication within external files ──────────
-        new_df, self_dups = _self_deduplicate(new_df)
+        new_df, self_dups = _self_deduplicate(new_df, source_labels)
         all_dup_records.extend(self_dups)
 
         if self_dups:
@@ -444,7 +471,7 @@ def main() -> None:
         print(f"After self-dedup: {len(new_df)} rows")
 
         # ── Deduplicate against papers.csv ────────────────────
-        unique_new, existing_dups = _deduplicate_against_existing(new_df, existing_df)
+        unique_new, existing_dups = _deduplicate_against_existing(new_df, existing_df, source_labels)
         all_dup_records.extend(existing_dups)
 
         print(f"\nDuplicates with papers.csv: {len(existing_dups)}")
@@ -469,7 +496,7 @@ def main() -> None:
         print("\n" + "=" * 55)
         for col in CANONICAL_COLUMNS:
             if col not in existing_df.columns:
-                existing_df[col] = "internal" if col == "source_type" else ""
+                existing_df[col] = existing_df["source"] if col == "source_type" else ""
         existing_aligned = existing_df[CANONICAL_COLUMNS]
 
         # Drop the internal tracking column before saving

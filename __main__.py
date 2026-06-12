@@ -1,9 +1,9 @@
 # =============================================================
 # __main__.py — Run the full pipeline in order:
-#   1. main.py          — fetch, deduplicate, categorize
-#   2. validate.py      — quality check on fetched papers
-#   3. merge_external.py — merge CSVs from other_resources/
-#   4. validate.py      — quality check on merged papers
+#   1. main.py               — fetch, deduplicate, categorize
+#   2. validate.py           — quality check on fetched papers
+#   3. merge_external.py     — merge CSVs from other_resources/
+#   4. validate.py           — quality check on merged papers
 #
 # Usage:  python .
 #         python -m GetPapersfromDifferentDBS
